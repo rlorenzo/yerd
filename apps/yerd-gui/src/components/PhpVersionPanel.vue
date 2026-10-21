@@ -41,6 +41,7 @@ import {
 import type { PhpExtInfo, PhpVersion, PhpVersionsResponse } from "@/ipc/types";
 import {
   DISPLAY_ERRORS_HINT,
+  OPENTELEMETRY_HINT,
   directiveNameProblem,
   directiveValueProblem,
   effectiveValue,
@@ -137,6 +138,15 @@ const displayErrorsOptions = computed(() => {
   const inherited = effectiveValue(props.globalSettings, {}, "display_errors");
   return [
     { value: "", label: `- inherit (${inherited ?? "default"}) -` },
+    { value: "On", label: "On" },
+    { value: "Off", label: "Off" },
+  ];
+});
+
+const opentelemetryOptions = computed(() => {
+  const inherited = effectiveValue(props.globalSettings, {}, "opentelemetry");
+  return [
+    { value: "", label: `- inherit (${inherited ?? "On"}) -` },
     { value: "On", label: "On" },
     { value: "Off", label: "Off" },
   ];
@@ -406,6 +416,29 @@ function discard(): void {
               />
             </div>
           </div>
+          <div>
+            <div class="flex items-center gap-1">
+              <span class="text-xs font-medium">OpenTelemetry</span>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span class="inline-flex cursor-help text-muted-foreground">
+                    <Info class="size-3.5" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">{{ OPENTELEMETRY_HINT }}</TooltipContent>
+              </Tooltip>
+            </div>
+            <div class="mt-1">
+              <Select
+                class="w-full"
+                :model-value="form.opentelemetry ?? ''"
+                :options="opentelemetryOptions"
+                :disabled="isBusy"
+                :aria-label="`opentelemetry for PHP ${version}`"
+                @update:model-value="(v: string) => (form.opentelemetry = v)"
+              />
+            </div>
+          </div>
         </div>
       </TooltipProvider>
 
@@ -614,6 +647,7 @@ function discard(): void {
               <code class="truncate text-xs">{{ name }} = {{ value }}</code>
               <span class="flex items-center">
                 <Button
+                  v-if="directiveNameProblem(name) === null"
                   variant="ghost"
                   size="sm"
                   :disabled="isBusy"

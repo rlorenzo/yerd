@@ -60,10 +60,20 @@ export const DISPLAY_ERRORS_OPTIONS = [
   { value: "Off", label: "Off" },
 ] as const;
 
-/** Every allowlisted setting name, including the select-backed display_errors. */
+export const OPENTELEMETRY_HINT =
+  "Engine hooks for OpenTelemetry auto-instrumentation. Turn Off to use the OPcache JIT compiler.";
+
+export const OPENTELEMETRY_OPTIONS = [
+  { value: "", label: "- default (On) -" },
+  { value: "On", label: "On" },
+  { value: "Off", label: "Off" },
+] as const;
+
+/** Every allowlisted setting name, including the select-backed ones. */
 export const SETTING_KEYS: readonly string[] = [
   ...TEXT_SETTINGS.map((s) => s.key),
   "display_errors",
+  "opentelemetry",
 ];
 
 /**
@@ -98,6 +108,7 @@ const RESERVED_DIRECTIVES = new Map<string, string>([
   ["zend_extension", "load extensions in the Extensions section above"],
   ["openssl.cafile", "Yerd manages the CA bundle for this"],
   ["curl.cainfo", "Yerd manages the CA bundle for this"],
+  ["opentelemetry.conflicts", "set OpenTelemetry in the settings form above"],
 ]);
 
 /**
@@ -132,6 +143,17 @@ export function directiveValueProblem(value: string): string | null {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f[\]=;#]/.test(value)) {
     return "values can't contain [ ] = ; # or control characters";
+  }
+  const t = value.trim();
+  if (t.includes('"')) {
+    const inner = t.slice(1, -1);
+    const balanced =
+      t.length >= 2 &&
+      t.startsWith('"') &&
+      t.endsWith('"') &&
+      !inner.includes('"') &&
+      !inner.endsWith("\\");
+    if (!balanced) return "a double quote must wrap the whole value, e.g. \"UTC\"";
   }
   return null;
 }

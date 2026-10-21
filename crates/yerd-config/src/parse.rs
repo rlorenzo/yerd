@@ -520,12 +520,14 @@ impl TryFrom<Wire> for Config {
             });
         }
         let tld = yerd_core::Tld::new(&w.tld)?;
+        let mut version_settings = convert_version_settings(w.php.version_settings)?;
+        let directives = convert_directives(w.php.directives, &mut version_settings)?;
         let php = PhpSection {
             default: yerd_core::PhpVersion::from_str(&w.php.default)?,
             settings: w.php.settings,
             extensions: convert_extensions(w.php.extensions)?,
-            version_settings: convert_version_settings(w.php.version_settings)?,
-            directives: convert_directives(w.php.directives)?,
+            version_settings,
+            directives,
             pool: convert_pool(w.php.pool)?,
         };
         let ports = Ports {
@@ -793,25 +795,132 @@ fn convert_version_settings(
     Ok(out)
 }
 
+/// Module names statically compiled into Yerd's PHP 8.2+ binaries, as
+/// `zend_module_entry.name` (space-free). `ext-opentelemetry` disables itself at
+/// `MINIT` when any token of `opentelemetry.conflicts` names one of these.
+/// `Zend OPcache` is absent on purpose: its name contains a space, so the
+/// extension's whitespace split never matches it.
+const BUNDLED_STATIC_MODULES: &[&str] = &[
+    "Core",
+    "PDO",
+    "Phar",
+    "Reflection",
+    "SPL",
+    "SimpleXML",
+    "apcu",
+    "bcmath",
+    "bz2",
+    "calendar",
+    "ctype",
+    "curl",
+    "date",
+    "dba",
+    "dom",
+    "event",
+    "exif",
+    "fileinfo",
+    "filter",
+    "ftp",
+    "gd",
+    "gmp",
+    "hash",
+    "iconv",
+    "imagick",
+    "imap",
+    "intl",
+    "json",
+    "libxml",
+    "mbstring",
+    "mysqli",
+    "mysqlnd",
+    "openssl",
+    "opentelemetry",
+    "pcntl",
+    "pcre",
+    "pdo_mysql",
+    "pdo_pgsql",
+    "pdo_sqlite",
+    "pgsql",
+    "posix",
+    "protobuf",
+    "random",
+    "readline",
+    "redis",
+    "session",
+    "shmop",
+    "soap",
+    "sockets",
+    "sodium",
+    "sqlite3",
+    "standard",
+    "swoole",
+    "sysvmsg",
+    "sysvsem",
+    "sysvshm",
+    "tokenizer",
+    "xml",
+    "xmlreader",
+    "xmlwriter",
+    "xsl",
+    "zip",
+    "zlib",
+];
+
 /// Convert the raw wire per-version directives map into the typed
 /// [`PhpSection::directives`] shape. Same policy as
 /// [`convert_version_settings`]: a bad version key errors, while an entry with
 /// an invalid or reserved name, or an invalid value, is dropped leniently.
+///
+/// `opentelemetry.conflicts` was a free-form directive before it became
+/// reserved, so a stored one is migrated rather than dropped: a list naming a
+/// bundled module (which disabled OpenTelemetry unconditionally) becomes
+/// `opentelemetry = "Off"` in `version_settings` unless that is already set; an
+/// inert list (PHP < 8.2, empty, `opcache` only) is dropped; any other list may
+/// depend on a user-registered module and is kept verbatim.
 fn convert_directives(
     wire: BTreeMap<String, BTreeMap<String, String>>,
+    version_settings: &mut BTreeMap<yerd_core::PhpVersion, BTreeMap<String, String>>,
 ) -> Result<BTreeMap<yerd_core::PhpVersion, BTreeMap<String, String>>, ConfigError> {
     use yerd_core::php_directives;
     let mut out = BTreeMap::new();
     for (ver, entries) in wire {
         let v = yerd_core::PhpVersion::from_str(&ver)?;
-        let kept: BTreeMap<String, String> = entries
-            .into_iter()
-            .filter(|(k, val)| {
-                php_directives::validate_name(k).is_ok()
-                    && php_directives::validate_value(val).is_ok()
-                    && php_directives::reserved(k).is_none()
-            })
-            .collect();
+        let mut kept: BTreeMap<String, String> = BTreeMap::new();
+        for (k, val) in entries {
+            if php_directives::validate_name(&k).is_err()
+                || php_directives::validate_value(&val).is_err()
+            {
+                continue;
+            }
+            if k == php_directives::CONFLICTS {
+                let explicit = version_settings
+                    .get(&v)
+                    .and_then(|m| m.get("opentelemetry"))
+                    .is_some();
+                let tokens: Vec<&str> = php_directives::unquote_value(&val)
+                    .split([' ', ','])
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if explicit {
+                    continue;
+                }
+                if (v.major, v.minor) >= (8, 2)
+                    && tokens.iter().any(|t| BUNDLED_STATIC_MODULES.contains(t))
+                {
+                    version_settings
+                        .entry(v)
+                        .or_default()
+                        .insert("opentelemetry".to_owned(), "Off".to_owned());
+                } else if (v.major, v.minor) >= (8, 2)
+                    && !tokens.is_empty()
+                    && !tokens.iter().all(|t| *t == "opcache")
+                {
+                    kept.insert(k, val.trim().to_owned());
+                }
+            } else if php_directives::reserved(&k).is_none() {
+                kept.insert(k, val);
+            }
+        }
         if !kept.is_empty() {
             out.insert(v, kept);
         }
@@ -2678,6 +2787,45 @@ target = \"../../etc/passwd\"\n";
     /// tables are dropped without failing the load, while valid siblings
     /// survive. Strictness lives at set time (CLI/daemon), not here - a bad
     /// hand-edit must never stop the daemon.
+    #[test]
+    fn legacy_opentelemetry_conflicts_directive_is_migrated() {
+        let v84 = yerd_core::PhpVersion::new(8, 4);
+        let base = Config::default().to_toml().unwrap();
+        let with = |tail: &str| Config::from_toml(&format!("{base}\n{tail}")).unwrap();
+
+        for raw in ["\"json\"", "\"opcache,json\"", "'\"json\"'"] {
+            let c = with(&format!(
+                "[php.directives.\"8.4\"]\n\"opentelemetry.conflicts\" = {raw}\n"
+            ));
+            assert_eq!(
+                c.php.version_settings[&v84]["opentelemetry"], "Off",
+                "{raw}"
+            );
+            assert!(c.php.directives.is_empty(), "{raw}");
+        }
+        for tail in [
+            "[php.directives.\"8.4\"]\n\"opentelemetry.conflicts\" = \"opcache\"\n",
+            "[php.directives.\"8.4\"]\n\"opentelemetry.conflicts\" = \",\"\n",
+            "[php.directives.\"8.1\"]\n\"opentelemetry.conflicts\" = \"json\"\n",
+        ] {
+            let c = with(tail);
+            assert!(c.php.version_settings.is_empty(), "{tail}");
+            assert!(c.php.directives.is_empty(), "{tail}");
+        }
+        let c = with("[php.directives.\"8.4\"]\n\"opentelemetry.conflicts\" = \"xdebug\"\n");
+        assert!(c.php.version_settings.is_empty());
+        assert_eq!(c.php.directives[&v84]["opentelemetry.conflicts"], "xdebug");
+        let again = Config::from_toml(&c.to_toml().unwrap()).unwrap();
+        assert_eq!(again.php.directives, c.php.directives);
+
+        let c = with(
+            "[php.version_settings.\"8.4\"]\nopentelemetry = \"On\"\n\
+             [php.directives.\"8.4\"]\n\"opentelemetry.conflicts\" = \"json\"\n",
+        );
+        assert_eq!(c.php.version_settings[&v84]["opentelemetry"], "On");
+        assert!(c.php.directives.is_empty());
+    }
+
     #[test]
     fn invalid_version_settings_and_directives_entries_are_dropped_leniently() {
         let s = "version = 16\n[php]\ndefault = \"8.3\"\n\

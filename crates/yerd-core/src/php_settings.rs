@@ -45,6 +45,9 @@ struct Spec {
     /// belongs in the generated CLI `php.ini`. Request-only directives
     /// (upload/post sizes, input time, file uploads) are FPM-only.
     cli: bool,
+    /// Whether a fresh config seeds this setting. Unseeded settings are absent
+    /// until the user sets them and behave as `default` while absent.
+    seeded: bool,
 }
 
 /// The fixed allowlist. Extend here to support more directives.
@@ -56,24 +59,28 @@ const SETTINGS: &[Spec] = &[
         },
         default: "512M",
         cli: true,
+        seeded: true,
     },
     Spec {
         name: "max_execution_time",
         kind: Kind::Int,
         default: "60",
         cli: true,
+        seeded: true,
     },
     Spec {
         name: "max_input_time",
         kind: Kind::Int,
         default: "60",
         cli: false,
+        seeded: true,
     },
     Spec {
         name: "max_file_uploads",
         kind: Kind::Int,
         default: "20",
         cli: false,
+        seeded: true,
     },
     Spec {
         name: "upload_max_filesize",
@@ -82,6 +89,7 @@ const SETTINGS: &[Spec] = &[
         },
         default: "100M",
         cli: false,
+        seeded: true,
     },
     Spec {
         name: "post_max_size",
@@ -90,20 +98,35 @@ const SETTINGS: &[Spec] = &[
         },
         default: "100M",
         cli: false,
+        seeded: true,
     },
     Spec {
         name: "display_errors",
         kind: Kind::Flag,
         default: "On",
         cli: true,
+        seeded: true,
     },
     Spec {
         name: "error_reporting",
         kind: Kind::ErrorReporting,
         default: "E_ALL",
         cli: true,
+        seeded: true,
+    },
+    Spec {
+        name: "opentelemetry",
+        kind: Kind::Flag,
+        default: "On",
+        cli: true,
+        seeded: false,
     },
 ];
+
+/// The ini directive that makes `ext-opentelemetry` skip its observer hooks at
+/// `MINIT`: it disables itself when any named module is loaded, and `json` is
+/// always compiled in.
+const OTEL_CONFLICTS: (&str, &str) = ("opentelemetry.conflicts", "json");
 
 fn spec(name: &str) -> Option<&'static Spec> {
     SETTINGS.iter().find(|s| s.name == name)
@@ -126,7 +149,11 @@ pub fn supported_names() -> Vec<&'static str> {
 /// source of truth for "the values Yerd applies out of the box".
 #[must_use]
 pub fn default_settings() -> Vec<(&'static str, &'static str)> {
-    SETTINGS.iter().map(|s| (s.name, s.default)).collect()
+    SETTINGS
+        .iter()
+        .filter(|s| s.seeded)
+        .map(|s| (s.name, s.default))
+        .collect()
 }
 
 /// Whether a supported directive is meaningful for the CLI runtime and so
@@ -147,6 +174,15 @@ pub fn render_cli_ini(settings: &std::collections::BTreeMap<String, String>) -> 
     for s in SETTINGS.iter().filter(|s| s.cli) {
         if let Some(raw) = settings.get(s.name) {
             if validate_value(s.name, raw).is_ok() {
+                if s.name == "opentelemetry" {
+                    if is_otel_off(raw) {
+                        out.push_str(OTEL_CONFLICTS.0);
+                        out.push_str(" = ");
+                        out.push_str(OTEL_CONFLICTS.1);
+                        out.push('\n');
+                    }
+                    continue;
+                }
                 out.push_str(s.name);
                 out.push_str(" = ");
                 out.push_str(&canonical_value(s.name, raw));
@@ -238,14 +274,61 @@ pub fn merge_effective(
         .collect()
 }
 
+fn is_otel_off(raw: &str) -> bool {
+    validate_value("opentelemetry", raw).is_ok() && canonical_value("opentelemetry", raw) == "Off"
+}
+
+/// Whether the effective `settings` turn OpenTelemetry off.
+#[must_use]
+pub fn otel_off(settings: &[(String, String)]) -> bool {
+    settings
+        .iter()
+        .any(|(k, v)| k == "opentelemetry" && is_otel_off(v))
+}
+
 /// The FPM directive a setting renders as: `"php_flag"` for booleans, else
-/// `"php_value"`. `None` if the setting is not supported.
+/// `"php_value"`. `None` if the setting is not supported, or is synthetic
+/// (`opentelemetry` is not a PHP ini key; it renders as `opentelemetry.conflicts`).
 #[must_use]
 pub fn directive(name: &str) -> Option<&'static str> {
+    if name == "opentelemetry" {
+        return None;
+    }
     spec(name).map(|s| match s.kind {
         Kind::Flag => "php_flag",
         _ => "php_value",
     })
+}
+
+/// The `-d key=value` pairs `php-fpm` needs at startup, from the effective
+/// settings and the per-version free-form directives.
+///
+/// FPM reads pool `php_value[...]` only after `MINIT`, so directives that are
+/// read during module startup (`opcache.jit*`, `opentelemetry.conflicts`) only
+/// take effect when also passed on the command line. A retained
+/// `opentelemetry.conflicts` directive is dropped when `opentelemetry` is `Off`,
+/// since that setting supplies its own.
+#[must_use]
+pub fn fpm_startup_defines(
+    ini: &[(String, String)],
+    directives: &[(String, String)],
+) -> Vec<(String, String)> {
+    use crate::php_directives;
+    let off = otel_off(ini);
+    let mut out = Vec::new();
+    if off {
+        out.push((OTEL_CONFLICTS.0.to_owned(), OTEL_CONFLICTS.1.to_owned()));
+    }
+    for (k, v) in directives {
+        let allowed = php_directives::reserved(k).is_none() || (k == OTEL_CONFLICTS.0 && !off);
+        if allowed
+            && php_directives::validate_name(k).is_ok()
+            && php_directives::validate_value(v).is_ok()
+        {
+            out.push((k.clone(), v.trim().to_owned()));
+        }
+    }
+    out
 }
 
 /// Validate `value` for the supported setting `name`.
@@ -419,7 +502,8 @@ mod tests {
         assert_eq!(directive("memory_limit"), Some("php_value"));
         assert_eq!(directive("display_errors"), Some("php_flag"));
         assert_eq!(directive("nope"), None);
-        assert_eq!(supported_names().len(), 8);
+        assert_eq!(supported_names().len(), 9);
+        assert_eq!(directive("opentelemetry"), None);
     }
 
     #[test]
@@ -529,6 +613,36 @@ mod tests {
         assert!(ini.contains("display_errors = On\n"));
         assert!(!ini.contains("upload_max_filesize"));
         assert!(!ini.contains("post_max_size"));
+    }
+
+    #[test]
+    fn opentelemetry_off_renders_conflicts_in_cli_ini_and_fpm_defines() {
+        use std::collections::BTreeMap;
+        let off = BTreeMap::from([("opentelemetry".to_owned(), "off".to_owned())]);
+        assert_eq!(render_cli_ini(&off), "opentelemetry.conflicts = json\n");
+        let on = BTreeMap::from([("opentelemetry".to_owned(), "On".to_owned())]);
+        assert_eq!(render_cli_ini(&on), "");
+        assert!(applies_to_cli("opentelemetry"));
+
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let dirs = [
+            pair("opcache.jit", "tracing"),
+            pair("date.timezone", "\"Asia/Hong_Kong\""),
+            pair("opentelemetry.conflicts", "xdebug"),
+            pair("memory_limit", "1G"),
+        ];
+        let got = fpm_startup_defines(&[pair("opentelemetry", "Off")], &dirs);
+        assert_eq!(
+            got,
+            vec![
+                pair("opentelemetry.conflicts", "json"),
+                pair("opcache.jit", "tracing"),
+                pair("date.timezone", "\"Asia/Hong_Kong\""),
+            ]
+        );
+        let kept = fpm_startup_defines(&[], &dirs);
+        assert!(kept.contains(&pair("opentelemetry.conflicts", "xdebug")));
+        assert!(!kept.iter().any(|(k, _)| k == "memory_limit"));
     }
 
     #[test]

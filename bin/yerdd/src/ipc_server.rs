@@ -2086,16 +2086,21 @@ async fn set_php_settings(
     *cfg_guard = new;
     drop(cfg_guard);
 
+    let mut first_failure = None;
     {
         let mut mgr = state.php_manager.lock().await;
         mgr.set_ini_settings(applied);
         for snap in mgr.snapshots() {
             if let Err(e) = mgr.restart(snap.version).await {
                 tracing::warn!(version = %snap.version, error = %e, "failed to restart FPM pool after settings change");
+                first_failure.get_or_insert((snap.version, e));
             }
         }
     }
     write_cli_ini_now(state).await;
+    if let Some((version, e)) = first_failure {
+        return php_restart_failure_response(version, &e, &state.dirs);
+    }
     tracing::info!("applied global PHP settings");
     php_versions_response(state).await
 }
@@ -2130,11 +2135,24 @@ async fn set_php_version_settings(
             };
         }
         let canonical = yerd_core::php_settings::canonical_value(&key, &value);
+        if key == "opentelemetry" {
+            if let Some(map) = new.php.directives.get_mut(&version) {
+                map.remove(yerd_core::php_directives::CONFLICTS);
+            }
+        }
         new.php
             .version_settings
             .entry(version)
             .or_default()
             .insert(key, canonical);
+    }
+    if new
+        .php
+        .directives
+        .get(&version)
+        .is_some_and(std::collections::BTreeMap::is_empty)
+    {
+        new.php.directives.remove(&version);
     }
     if new
         .php
@@ -2145,7 +2163,9 @@ async fn set_php_version_settings(
         new.php.version_settings.remove(&version);
     }
 
-    if new.php.version_settings == cfg_guard.php.version_settings {
+    if new.php.version_settings == cfg_guard.php.version_settings
+        && new.php.directives == cfg_guard.php.directives
+    {
         drop(cfg_guard);
         return php_versions_response(state).await;
     }
@@ -2159,7 +2179,9 @@ async fn set_php_version_settings(
     *cfg_guard = new;
     drop(cfg_guard);
 
-    apply_version_php_config(state, version).await;
+    if let Err(e) = apply_version_php_config(state, version).await {
+        return php_restart_failure_response(version, &e, &state.dirs);
+    }
     tracing::info!(version = %version, "applied per-version PHP settings");
     php_versions_response(state).await
 }
@@ -2188,7 +2210,9 @@ async fn set_php_directives(
                 message: e.to_string(),
             };
         }
-        if let Some(hint) = yerd_core::php_directives::reserved(&key) {
+        let removing_retained = value.is_empty() && key == yerd_core::php_directives::CONFLICTS;
+        if let Some(hint) = yerd_core::php_directives::reserved(&key).filter(|_| !removing_retained)
+        {
             return Response::Error {
                 code: ErrorCode::InvalidPath,
                 message: format!("{key} is managed by Yerd: {hint}"),
@@ -2235,7 +2259,9 @@ async fn set_php_directives(
     *cfg_guard = new;
     drop(cfg_guard);
 
-    apply_version_php_config(state, version).await;
+    if let Err(e) = apply_version_php_config(state, version).await {
+        return php_restart_failure_response(version, &e, &state.dirs);
+    }
     tracing::info!(version = %version, "applied per-version PHP ini directives");
     php_versions_response(state).await
 }
@@ -2308,7 +2334,9 @@ async fn set_php_pool_settings(
     *cfg_guard = new;
     drop(cfg_guard);
 
-    apply_version_php_config(state, version).await;
+    if let Err(e) = apply_version_php_config(state, version).await {
+        return php_restart_failure_response(version, &e, &state.dirs);
+    }
     tracing::info!(version = %version, "applied per-version FPM pool settings");
     php_versions_response(state).await
 }
@@ -2335,7 +2363,10 @@ fn require_installed(version: yerd_core::PhpVersion, state: &DaemonState) -> Opt
 /// which is what keeps the config re-read here from racing a concurrent
 /// settings mutation. The pool map never reaches `write_cli_ini`, so pool
 /// settings cannot leak into a CLI `php.ini`.
-async fn apply_version_php_config(state: &DaemonState, affected: yerd_core::PhpVersion) {
+async fn apply_version_php_config(
+    state: &DaemonState,
+    affected: yerd_core::PhpVersion,
+) -> Result<(), yerd_php::PhpError> {
     let (version_settings, directives, pool) = {
         let cfg = state.config.lock().await;
         (
@@ -2344,18 +2375,64 @@ async fn apply_version_php_config(state: &DaemonState, affected: yerd_core::PhpV
             cfg.php.pool.clone(),
         )
     };
-    {
+    let outcome = {
         let mut mgr = state.php_manager.lock().await;
         mgr.set_ini_overrides(version_settings);
         mgr.set_directives(directives);
         mgr.set_pool_overrides(pool);
         if mgr.snapshots().iter().any(|s| s.version == affected) {
-            if let Err(e) = mgr.restart(affected).await {
-                tracing::warn!(version = %affected, error = %e, "failed to restart FPM pool after per-version PHP config change");
-            }
+            mgr.restart(affected).await.map(|_| ())
+        } else {
+            Ok(())
         }
-    }
+    };
     write_cli_ini_now(state).await;
+    outcome
+}
+
+const PHP_RESTART_LOG_LINES: usize = 5;
+
+/// The error returned when a saved PHP config change leaves the pool unable to
+/// restart. Includes the tail of the pool's log, where FPM writes `MINIT`
+/// failures such as an impossible `opcache.jit_buffer_size`, and how to undo it.
+fn php_restart_failure_response(
+    version: yerd_core::PhpVersion,
+    e: &yerd_php::PhpError,
+    dirs: &yerd_platform::PlatformDirs,
+) -> Response {
+    let prefix = format!("fpm-{version}-");
+    let newest_log = std::fs::read_dir(&dirs.state)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|ent| {
+            let name = ent.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && name.ends_with(".log")
+        })
+        .filter_map(|ent| Some((ent.metadata().ok()?.modified().ok()?, ent.path())))
+        .max()
+        .map(|(_, path)| path);
+    let mut tail: Vec<String> = newest_log
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+        .rev()
+        .take(PHP_RESTART_LOG_LINES)
+        .collect();
+    tail.reverse();
+    let log_block = if tail.is_empty() {
+        String::new()
+    } else {
+        format!("\nlast lines of the FPM log:\n{}", tail.join("\n"))
+    };
+    internal(format!(
+        "the change was saved, but PHP {version} failed to restart: {e}{log_block}\n\
+         undo it with `yerd php ini unset {version} <directive>` or \
+         `yerd unset php <setting> [--only {version}]`"
+    ))
 }
 
 /// Register a custom extension for `version`: validate, load-probe, persist, then

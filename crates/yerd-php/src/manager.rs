@@ -27,7 +27,7 @@
 //! out. These are the only two serialisation points against stale
 //! sockets; if you add a third, document it here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -131,6 +131,8 @@ where
     dirs: PlatformDirs,
     binder: ActivePortBinder,
     pools: BTreeMap<PhpVersion, Pool<S::Child>>,
+    /// Versions whose last `ensure` failed, so they stay visible as `Failed`.
+    failed_pools: BTreeSet<PhpVersion>,
     binaries: BTreeMap<PhpVersion, PathBuf>,
     ini_settings: BTreeMap<String, String>,
     ini_overrides: BTreeMap<PhpVersion, BTreeMap<String, String>>,
@@ -173,6 +175,7 @@ where
             dirs,
             binder,
             pools: BTreeMap::new(),
+            failed_pools: BTreeSet::new(),
             binaries,
             ini_settings: BTreeMap::new(),
             ini_overrides: BTreeMap::new(),
@@ -291,6 +294,16 @@ where
     /// plans an address, renders the config, spawns FPM, and waits for
     /// a healthy probe before returning.
     pub async fn ensure(&mut self, v: PhpVersion) -> Result<Listen, PhpError> {
+        let result = self.ensure_inner(v).await;
+        if result.is_ok() {
+            self.failed_pools.remove(&v);
+        } else {
+            self.failed_pools.insert(v);
+        }
+        result
+    }
+
+    async fn ensure_inner(&mut self, v: PhpVersion) -> Result<Listen, PhpError> {
         let binary = self
             .binaries
             .get(&v)
@@ -354,15 +367,21 @@ where
         let extension = cfg.extension.clone();
         let ini_defines = cfg.ini_defines.clone();
         let user_extensions = cfg.user_extensions.clone();
+        let startup_defines =
+            yerd_core::php_settings::fpm_startup_defines(&cfg.ini, &cfg.directives);
+        let error_log = cfg.error_log.clone();
         let cmd_builder = || {
-            build_cmd(
+            let mut cmd = build_cmd(
                 &binary,
                 &cfg.config_path,
                 &env,
                 extension.as_deref(),
                 &ini_defines,
                 &user_extensions,
-            )
+                &startup_defines,
+            );
+            attach_log(&mut cmd, &error_log);
+            cmd
         };
 
         let initial_state = PoolState::Stopped;
@@ -449,6 +468,7 @@ where
 
     /// Stop the pool for `v`. No-op if there is no pool.
     pub async fn stop(&mut self, v: PhpVersion) -> Result<(), PhpError> {
+        self.failed_pools.remove(&v);
         let Some(mut pool) = self.pools.remove(&v) else {
             return Ok(());
         };
@@ -516,6 +536,16 @@ where
                 pid,
                 listen,
             });
+        }
+        for version in &self.failed_pools {
+            if !self.pools.contains_key(version) {
+                out.push(PoolSnapshot {
+                    version: *version,
+                    state: PoolRunState::Failed,
+                    pid: None,
+                    listen: None,
+                });
+            }
         }
         out
     }
@@ -764,6 +794,18 @@ async fn wait_after_kill<Ch: ChildHandle>(
     }
 }
 
+/// Send the child's stdout/stderr to the pool `error_log`. FPM runs `MINIT`
+/// before it opens that log, so a fatal startup error would otherwise be lost.
+fn attach_log(cmd: &mut StdCommand, path: &std::path::Path) {
+    let Ok(file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let Ok(dup) = file.try_clone() else {
+        return;
+    };
+    cmd.stdout(file).stderr(dup);
+}
+
 fn build_cmd(
     binary: &PathBuf,
     config_path: &PathBuf,
@@ -771,6 +813,7 @@ fn build_cmd(
     extension: Option<&std::path::Path>,
     ini_defines: &[(String, String)],
     user_extensions: &[ExtLoad],
+    startup_defines: &[(String, String)],
 ) -> StdCommand {
     let mut cmd = StdCommand::new(binary);
     if let Some(so) = extension {
@@ -787,6 +830,9 @@ fn build_cmd(
         };
         cmd.arg("-d")
             .arg(format!("{directive}={}", ext.path.display()));
+    }
+    for (k, val) in startup_defines {
+        cmd.arg("-d").arg(format!("{k}={val}"));
     }
     cmd.arg("--fpm-config").arg(config_path);
     cmd.env_clear();
@@ -841,7 +887,7 @@ mod pure_helper_tests {
         let binary = PathBuf::from("/opt/php/bin/php");
         let config = PathBuf::from("/run/yerd/fpm-8.3.conf");
         let env = vec![("PATH".to_owned(), "/usr/bin".to_owned())];
-        let cmd = build_cmd(&binary, &config, &env, None, &[], &[]);
+        let cmd = build_cmd(&binary, &config, &env, None, &[], &[], &[]);
 
         assert_eq!(cmd.get_program(), OsStr::new("/opt/php/bin/php"));
         let args = args_of(&cmd);
@@ -867,7 +913,7 @@ mod pure_helper_tests {
         let env: Vec<(String, String)> = vec![];
         let so = Path::new("/lib/yerd-dump.so");
         let defines = vec![("yerd_dump.state_path".to_owned(), "/var/state".to_owned())];
-        let cmd = build_cmd(&binary, &config, &env, Some(so), &defines, &[]);
+        let cmd = build_cmd(&binary, &config, &env, Some(so), &defines, &[], &[]);
 
         let args = args_of(&cmd);
         assert_eq!(
@@ -890,6 +936,34 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn build_cmd_emits_startup_defines_after_extensions_before_fpm_config() {
+        let binary = PathBuf::from("/opt/php/bin/php");
+        let config = PathBuf::from("/run/yerd/fpm-8.4.conf");
+        let user = vec![ExtLoad {
+            path: PathBuf::from("/lib/x.so"),
+            zend: false,
+        }];
+        let defines = vec![
+            ("opentelemetry.conflicts".to_owned(), "json".to_owned()),
+            ("opcache.jit".to_owned(), "tracing".to_owned()),
+        ];
+        let cmd = build_cmd(&binary, &config, &[], None, &[], &user, &defines);
+        assert_eq!(
+            args_of(&cmd),
+            vec![
+                "-d",
+                "extension=/lib/x.so",
+                "-d",
+                "opentelemetry.conflicts=json",
+                "-d",
+                "opcache.jit=tracing",
+                "--fpm-config",
+                "/run/yerd/fpm-8.4.conf",
+            ]
+        );
+    }
+
+    #[test]
     fn build_cmd_emits_user_extensions_with_and_without_dump_ext() {
         let binary = PathBuf::from("/opt/php/bin/php");
         let config = PathBuf::from("/run/yerd/fpm-8.5.conf");
@@ -904,7 +978,7 @@ mod pure_helper_tests {
                 zend: true,
             },
         ];
-        let cmd = build_cmd(&binary, &config, &env, None, &[], &user);
+        let cmd = build_cmd(&binary, &config, &env, None, &[], &user, &[]);
         let args = args_of(&cmd);
         assert_eq!(
             args,
@@ -919,7 +993,7 @@ mod pure_helper_tests {
         );
 
         let so = Path::new("/lib/yerd-dump.so");
-        let cmd = build_cmd(&binary, &config, &env, Some(so), &[], &user);
+        let cmd = build_cmd(&binary, &config, &env, Some(so), &[], &user, &[]);
         let args = args_of(&cmd);
         assert_eq!(
             args,

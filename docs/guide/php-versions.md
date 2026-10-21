@@ -124,7 +124,7 @@ on 8.4, as noted.
 | `mysqli` | The improved, feature-complete MySQL/MariaDB driver. |
 | `mysqlnd` | The native driver backend that `mysqli` and PDO's MySQL driver run on. |
 | `openssl` | TLS, symmetric/asymmetric encryption, signatures, and X.509 certificate handling. |
-| `opentelemetry` | Engine hooks that let OpenTelemetry auto-instrument code for tracing and metrics. |
+| `opentelemetry` | Engine hooks that let OpenTelemetry auto-instrument code for tracing and metrics. Turn it off with `yerd set php opentelemetry Off` to use the OPcache JIT. |
 | `pcntl` | Unix process control (fork, signals, `waitpid`) for CLI worker processes. |
 | `pcre` | *(core)* Perl-compatible regular expressions, i.e. the `preg_*` functions. |
 | `PDO` | *(core)* The database-access abstraction layer; the bundled drivers cover MySQL, PostgreSQL, and SQLite. |
@@ -481,6 +481,19 @@ and applies to both its FPM pool and its CLI:
 ```sh
 yerd set php memory_limit 1G --only 8.3   # only PHP 8.3 gets 1G
 yerd unset php memory_limit --only 8.3    # 8.3 inherits the global value again
+```
+
+To use the OPcache JIT, turn OpenTelemetry off (its engine hooks make PHP
+disable the JIT) and give the JIT a buffer. Older PHP 8.2-8.5 installs need
+`yerd php update` first to pick up a build where the JIT can start:
+
+```sh
+yerd php update 8.4
+yerd set php opentelemetry Off --only 8.4
+yerd php ini set 8.4 opcache.enable 1
+yerd php ini set 8.4 opcache.jit_buffer_size 64M
+yerd php ini set 8.4 opcache.jit tracing
+yerd php ini set 8.4 opcache.enable_cli 1   # optional: JIT for `php84` too
 ```
 
 Beyond the allowlist, `yerd php ini` sets **free-form ini directives** per

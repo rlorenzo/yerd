@@ -109,6 +109,7 @@ The setting name (and, for `set`, the value) is validated client-side before con
 | `post_max_size` | byte size (e.g. `64M`) |
 | `display_errors` | boolean flag (e.g. `On` / `Off`) |
 | `error_reporting` | an `error_reporting` expression |
+| `opentelemetry` | boolean flag (e.g. `On` / `Off`); `Off` disables the OpenTelemetry engine hooks so OPcache JIT can run |
 
 ::: tip
 The configured settings are echoed back by `yerd list php` under a `settings:` block, and each version's overrides, directives, and pool size follow in a `PHP <version>:` section, so you can confirm what's currently applied. See the [Configuration Reference](../configuration) for how these are stored and rendered into FPM config.
@@ -170,10 +171,14 @@ yerd php ini list
 yerd php ini unset 8.3 xdebug.mode
 ```
 
+`opentelemetry.conflicts` is reserved: use `yerd set php opentelemetry` instead. A
+legacy entry that can't be migrated automatically can still be removed with
+`yerd php ini unset <VERSION> opentelemetry.conflicts`.
+
 Names and values are **shape-validated** (no control characters or the ini
 metacharacters `[ ] = ; #`), but not semantically: a well-formed directive PHP
 doesn't recognise is simply ignored by PHP. Directives Yerd manages through
-typed paths are refused with a pointer to the right command: the eight
+typed paths are refused with a pointer to the right command: the nine
 [allowlisted settings](#global-php-ini-settings) (use `yerd set php`,
 optionally with `--only`), `extension`/`zend_extension` (use `yerd php ext`),
 and `openssl.cafile`/`curl.cainfo` (Yerd manages the CA bundle).

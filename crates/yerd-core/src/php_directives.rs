@@ -46,7 +46,14 @@ const RESERVED: &[(&str, &str)] = &[
     ),
     ("openssl.cafile", "Yerd manages the CA bundle for this"),
     ("curl.cainfo", "Yerd manages the CA bundle for this"),
+    (
+        CONFLICTS,
+        "OpenTelemetry is managed with `yerd set php opentelemetry` (add --only <version> for a per-version value)",
+    ),
 ];
+
+/// The `ext-opentelemetry` directive Yerd renders for `opentelemetry = Off`.
+pub const CONFLICTS: &str = "opentelemetry.conflicts";
 
 /// If `name` is a directive Yerd manages elsewhere, the human-readable hint
 /// explaining where; `None` when the name is free for custom use.
@@ -132,7 +139,26 @@ pub fn validate_value(value: &str) -> Result<(), DirectiveError> {
     {
         return err(ValueErrorReason::IllegalCharacter);
     }
+    let t = value.trim();
+    if t.contains('"') {
+        let balanced = t
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .is_some_and(|inner| !inner.contains('"') && !inner.ends_with('\\'));
+        if !balanced {
+            return err(ValueErrorReason::IllegalCharacter);
+        }
+    }
     Ok(())
+}
+
+/// Trim `value` and strip one balanced outer `"..."` pair, if present.
+#[must_use]
+pub fn unquote_value(value: &str) -> &str {
+    let t = value.trim();
+    t.strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .unwrap_or(t)
 }
 
 /// Render a directives map as `name = value` ini lines for a CLI `php.ini`,
@@ -140,15 +166,22 @@ pub fn validate_value(value: &str) -> Result<(), DirectiveError> {
 /// [`validate_value`] or naming a [`reserved`] directive are skipped
 /// defensively - this renderer runs after the set-time and load-time checks,
 /// so nothing malformed can reach a generated file even if a bad entry slips
-/// through. Values are trimmed; empty when nothing renders.
+/// through. Values are trimmed; empty when nothing renders. A retained
+/// [`CONFLICTS`] entry is never rendered here; see [`render_ini_lines_with_otel`].
 #[must_use]
 pub fn render_ini_lines(directives: &BTreeMap<String, String>) -> String {
+    render_ini_lines_with_otel(directives, true)
+}
+
+/// Like [`render_ini_lines`], but renders a retained [`CONFLICTS`] entry (a
+/// legacy conditional conflict list) unless `otel_off`, where
+/// `opentelemetry = Off` supplies its own.
+#[must_use]
+pub fn render_ini_lines_with_otel(directives: &BTreeMap<String, String>, otel_off: bool) -> String {
     let mut out = String::new();
     for (name, value) in directives {
-        if validate_name(name).is_err()
-            || validate_value(value).is_err()
-            || reserved(name).is_some()
-        {
+        let allowed = reserved(name).is_none() || (name == CONFLICTS && !otel_off);
+        if validate_name(name).is_err() || validate_value(value).is_err() || !allowed {
             continue;
         }
         out.push_str(name);
@@ -304,6 +337,30 @@ mod tests {
         }
         assert!(reserved("xdebug.mode").is_none());
         assert!(reserved("opcache.enable").is_none());
+    }
+
+    #[test]
+    fn balanced_outer_quotes_are_accepted_and_stray_quotes_rejected() {
+        for v in ["\"Asia/Hong_Kong\"", "\"/a/b c.log\"", "\"json\"", "\"\""] {
+            assert!(validate_value(v).is_ok(), "{v}");
+        }
+        for v in ["\"unclosed", "unopened\"", "a\"b", "\"a\"b\"", "\"abc\\\""] {
+            assert!(validate_value(v).is_err(), "{v}");
+        }
+        assert_eq!(unquote_value(" \"json\" "), "json");
+        assert_eq!(unquote_value("json"), "json");
+    }
+
+    #[test]
+    fn retained_conflicts_render_only_when_otel_is_not_off() {
+        let m = BTreeMap::from([(CONFLICTS.to_owned(), "xdebug".to_owned())]);
+        assert_eq!(
+            render_ini_lines_with_otel(&m, false),
+            "opentelemetry.conflicts = xdebug\n"
+        );
+        assert_eq!(render_ini_lines_with_otel(&m, true), "");
+        assert_eq!(render_ini_lines(&m), "");
+        assert!(reserved("opentelemetry").is_some());
     }
 
     #[test]

@@ -32,6 +32,7 @@ import {
 import { useToast } from "@/composables/useToast";
 import {
   IpcError,
+  listPhp,
   type PhpExtensionsMap,
   removePhpExtension,
   setPhpDirectives,
@@ -41,6 +42,7 @@ import {
 import type { PhpExtInfo, PhpVersion, PhpVersionsResponse } from "@/ipc/types";
 import {
   DISPLAY_ERRORS_HINT,
+  OPENTELEMETRY_HINT,
   directiveNameProblem,
   directiveValueProblem,
   effectiveValue,
@@ -142,7 +144,19 @@ const displayErrorsOptions = computed(() => {
   ];
 });
 
+const opentelemetryOptions = computed(() => {
+  const inherited = effectiveValue(props.globalSettings, {}, "opentelemetry");
+  return [
+    { value: "", label: `- inherit (${inherited ?? "On"}) -` },
+    { value: "On", label: "On" },
+    { value: "Off", label: "Off" },
+  ];
+});
+
 const savedOverrides = computed(() => overrideCount(props.overrides));
+
+/** Prefix of the daemon's error when a change persisted but the pool restart failed. */
+const SAVED_BUT_FAILED = "the change was saved";
 
 /**
  * Persist this version's overrides. Every field is sent, including the blank
@@ -160,7 +174,15 @@ async function saveSettings(): Promise<void> {
     );
     emit("updated", r);
   } catch (e) {
-    toast.error(`Couldn't update PHP ${props.version} settings`, (e as IpcError).message);
+    const message = (e as IpcError).message;
+    if (message.startsWith(SAVED_BUT_FAILED)) {
+      const r = await listPhp().catch(() => null);
+      if (r) {
+        seed(r.version_settings?.[props.version] ?? {});
+        emit("updated", r);
+      }
+    }
+    toast.error(`Couldn't update PHP ${props.version} settings`, message);
   } finally {
     busy.value = null;
   }
@@ -406,6 +428,29 @@ function discard(): void {
               />
             </div>
           </div>
+          <div>
+            <div class="flex items-center gap-1">
+              <span class="text-xs font-medium">OpenTelemetry</span>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span class="inline-flex cursor-help text-muted-foreground">
+                    <Info class="size-3.5" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">{{ OPENTELEMETRY_HINT }}</TooltipContent>
+              </Tooltip>
+            </div>
+            <div class="mt-1">
+              <Select
+                class="w-full"
+                :model-value="form.opentelemetry ?? ''"
+                :options="opentelemetryOptions"
+                :disabled="isBusy"
+                :aria-label="`opentelemetry for PHP ${version}`"
+                @update:model-value="(v: string) => (form.opentelemetry = v)"
+              />
+            </div>
+          </div>
         </div>
       </TooltipProvider>
 
@@ -614,6 +659,7 @@ function discard(): void {
               <code class="truncate text-xs">{{ name }} = {{ value }}</code>
               <span class="flex items-center">
                 <Button
+                  v-if="directiveNameProblem(name) === null"
                   variant="ghost"
                   size="sm"
                   :disabled="isBusy"

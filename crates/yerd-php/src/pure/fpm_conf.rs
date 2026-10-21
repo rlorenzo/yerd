@@ -55,10 +55,13 @@ pub fn render_fpm_conf(cfg: &PoolConfig) -> String {
         }
     }
 
+    let otel_off = yerd_core::php_settings::otel_off(&cfg.ini);
     for (key, value) in &cfg.directives {
-        if yerd_core::php_directives::validate_name(key).is_ok()
+        let allowed = yerd_core::php_directives::reserved(key).is_none()
+            || (key == yerd_core::php_directives::CONFLICTS && !otel_off);
+        if allowed
+            && yerd_core::php_directives::validate_name(key).is_ok()
             && yerd_core::php_directives::validate_value(value).is_ok()
-            && yerd_core::php_directives::reserved(key).is_none()
         {
             let _ = writeln!(out, "php_value[{key}] = {value}");
         }

@@ -144,6 +144,7 @@ PHP defaults applied across sites.
 | `post_max_size`       | byte size (`64M`)                                             |
 | `display_errors`      | boolean flag (`On` / `Off`, rendered as a `php_flag`)         |
 | `error_reporting`     | integer or constant expression (e.g. `E_ALL & ~E_DEPRECATED`) |
+| `opentelemetry`       | boolean flag (`On` / `Off`); not seeded, absent means `On`. `Off` renders `opentelemetry.conflicts = json` |
 
 ```toml
 [php.settings]
@@ -167,8 +168,10 @@ per version - typically extension settings the allowlist doesn't cover
 (`xdebug.mode`, `opcache.*`, …). Names must start with a letter or `_` and use
 only letters, digits, `.`, `_`, `-`; values follow the same injection rules as
 `[php.settings]` (no control characters or `[ ] = ; #`, ≤ 256 bytes).
-Directives Yerd manages through typed paths are reserved: the eight allowlisted
-settings, `extension` / `zend_extension`, and `openssl.cafile` / `curl.cainfo`.
+Directives Yerd manages through typed paths are reserved: the nine allowlisted
+settings, `extension` / `zend_extension`, `openssl.cafile` / `curl.cainfo`, and
+`opentelemetry.conflicts`. A stored `opentelemetry.conflicts` that names a bundled
+module (e.g. `json`) is migrated to `opentelemetry = "Off"` on load.
 
 `[php.pool."<version>"]` (schema v20) holds **FPM pool settings** for that
 version's worker pool. The only key is `max_children`, the ceiling on

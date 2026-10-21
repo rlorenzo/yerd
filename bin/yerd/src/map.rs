@@ -686,7 +686,9 @@ fn php_ini_to_request(action: &crate::cli::PhpIniAction) -> Result<Request, Clie
     let validate_directive = |name: &str, value: Option<&str>| -> Result<(), ClientError> {
         yerd_core::php_directives::validate_name(name)
             .map_err(|e| ClientError::Usage(e.to_string()))?;
-        if let Some(hint) = yerd_core::php_directives::reserved(name) {
+        let removing_retained = value.is_none() && name == yerd_core::php_directives::CONFLICTS;
+        if let Some(hint) = yerd_core::php_directives::reserved(name).filter(|_| !removing_retained)
+        {
             return Err(ClientError::Usage(format!(
                 "{name} is managed by Yerd: {hint}"
             )));
@@ -2387,6 +2389,33 @@ mod tests {
             Err(ClientError::Usage(_)) => {}
             other => panic!("expected Usage error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn php_ini_opentelemetry_conflicts_can_be_unset_but_not_set() {
+        let ini = |action| Command::Php {
+            action: crate::cli::PhpAction::Ini { action },
+        };
+        assert!(to_request(&ini(crate::cli::PhpIniAction::Set {
+            version: "8.4".into(),
+            name: "opentelemetry.conflicts".into(),
+            value: "xdebug".into(),
+        }))
+        .is_err());
+        assert_eq!(
+            to_request(&ini(crate::cli::PhpIniAction::Unset {
+                version: "8.4".into(),
+                name: "opentelemetry.conflicts".into(),
+            }))
+            .unwrap(),
+            Request::SetPhpDirectives {
+                version: PhpVersion::new(8, 4),
+                directives: std::collections::BTreeMap::from([(
+                    "opentelemetry.conflicts".to_string(),
+                    String::new()
+                )])
+            }
+        );
     }
 
     #[test]

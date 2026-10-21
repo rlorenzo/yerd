@@ -277,7 +277,12 @@ pub fn write_cli_ini(
         );
         let mut body = yerd_core::php_settings::render_cli_ini_with_ext(&effective, &refs);
         if let Some(dirs_for_v) = directives.get(&v) {
-            body.push_str(&yerd_core::php_directives::render_ini_lines(dirs_for_v));
+            let off = effective.get("opentelemetry").is_some_and(|v| {
+                yerd_core::php_settings::otel_off(&[("opentelemetry".to_owned(), v.clone())])
+            });
+            body.push_str(&yerd_core::php_directives::render_ini_lines_with_otel(
+                dirs_for_v, off,
+            ));
         }
         let contents = decorate_cli_ini(&body, ca_bundle);
         let name = format!("php-cli-{}.{}.ini", v.major, v.minor);

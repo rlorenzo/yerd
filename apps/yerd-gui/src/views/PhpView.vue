@@ -66,6 +66,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DISPLAY_ERRORS_HINT,
   DISPLAY_ERRORS_OPTIONS,
+  OPENTELEMETRY_HINT,
+  OPENTELEMETRY_OPTIONS,
   overrideCount,
   TEXT_SETTINGS,
 } from "@/lib/phpSettings";
@@ -126,6 +128,7 @@ function applySettings(settings: Record<string, string> | undefined): void {
   const next: Record<string, string> = {};
   for (const s of TEXT_SETTINGS) next[s.key] = settings?.[s.key] ?? "";
   next.display_errors = settings?.display_errors ?? "";
+  next.opentelemetry = settings?.opentelemetry ?? "";
   settingsForm.value = next;
   lastSeeded = { ...next };
 }
@@ -163,7 +166,12 @@ async function saveSettings(): Promise<void> {
     toast.success("PHP settings updated", "Pools restart to apply the changes.");
     await reloadPhp({ force: true });
   } catch (e) {
-    toast.error("Couldn't update PHP settings", (e as IpcError).message);
+    const message = (e as IpcError).message;
+    if (message.startsWith("the change was saved")) {
+      await reloadPhp({ force: true });
+      if (!error.value) applySettings(data.value?.settings);
+    }
+    toast.error("Couldn't update PHP settings", message);
   } finally {
     busy.value = null;
   }
@@ -700,6 +708,28 @@ onUnmounted(
                   :options="DISPLAY_ERRORS_OPTIONS"
                   aria-label="display_errors"
                   @update:model-value="(v: string) => (settingsForm.display_errors = v)"
+                />
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center gap-1">
+                <span class="text-xs font-medium">OpenTelemetry</span>
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <span class="inline-flex cursor-help text-muted-foreground">
+                      <Info class="size-3.5" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{{ OPENTELEMETRY_HINT }}</TooltipContent>
+                </Tooltip>
+              </div>
+              <div class="mt-1">
+                <Select
+                  class="w-full"
+                  :model-value="settingsForm.opentelemetry ?? ''"
+                  :options="OPENTELEMETRY_OPTIONS"
+                  aria-label="opentelemetry"
+                  @update:model-value="(v: string) => (settingsForm.opentelemetry = v)"
                 />
               </div>
             </div>

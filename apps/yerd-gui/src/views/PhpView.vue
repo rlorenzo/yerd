@@ -166,7 +166,12 @@ async function saveSettings(): Promise<void> {
     toast.success("PHP settings updated", "Pools restart to apply the changes.");
     await reloadPhp({ force: true });
   } catch (e) {
-    toast.error("Couldn't update PHP settings", (e as IpcError).message);
+    const message = (e as IpcError).message;
+    if (message.startsWith("the change was saved")) {
+      await reloadPhp({ force: true });
+      applySettings(data.value?.settings);
+    }
+    toast.error("Couldn't update PHP settings", message);
   } finally {
     busy.value = null;
   }

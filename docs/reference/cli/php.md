@@ -178,7 +178,7 @@ legacy entry that can't be migrated automatically can still be removed with
 Names and values are **shape-validated** (no control characters or the ini
 metacharacters `[ ] = ; #`), but not semantically: a well-formed directive PHP
 doesn't recognise is simply ignored by PHP. Directives Yerd manages through
-typed paths are refused with a pointer to the right command: the eight
+typed paths are refused with a pointer to the right command: the nine
 [allowlisted settings](#global-php-ini-settings) (use `yerd set php`,
 optionally with `--only`), `extension`/`zend_extension` (use `yerd php ext`),
 and `openssl.cafile`/`curl.cainfo` (Yerd manages the CA bundle).

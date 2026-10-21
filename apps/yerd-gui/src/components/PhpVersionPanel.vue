@@ -32,6 +32,7 @@ import {
 import { useToast } from "@/composables/useToast";
 import {
   IpcError,
+  listPhp,
   type PhpExtensionsMap,
   removePhpExtension,
   setPhpDirectives,
@@ -158,6 +159,9 @@ const savedOverrides = computed(() => overrideCount(props.overrides));
  * Persist this version's overrides. Every field is sent, including the blank
  * ones: a blank value removes the override so the version inherits again.
  */
+/** Prefix of the daemon's error when a change persisted but the pool restart failed. */
+const SAVED_BUT_FAILED = "the change was saved";
+
 async function saveSettings(): Promise<void> {
   if (isBusy.value) return;
   busy.value = "settings";
@@ -170,7 +174,15 @@ async function saveSettings(): Promise<void> {
     );
     emit("updated", r);
   } catch (e) {
-    toast.error(`Couldn't update PHP ${props.version} settings`, (e as IpcError).message);
+    const message = (e as IpcError).message;
+    if (message.startsWith(SAVED_BUT_FAILED)) {
+      const r = await listPhp().catch(() => null);
+      if (r) {
+        seed(r.version_settings?.[props.version] ?? {});
+        emit("updated", r);
+      }
+    }
+    toast.error(`Couldn't update PHP ${props.version} settings`, message);
   } finally {
     busy.value = null;
   }

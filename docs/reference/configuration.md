@@ -168,7 +168,7 @@ per version - typically extension settings the allowlist doesn't cover
 (`xdebug.mode`, `opcache.*`, …). Names must start with a letter or `_` and use
 only letters, digits, `.`, `_`, `-`; values follow the same injection rules as
 `[php.settings]` (no control characters or `[ ] = ; #`, ≤ 256 bytes).
-Directives Yerd manages through typed paths are reserved: the eight allowlisted
+Directives Yerd manages through typed paths are reserved: the nine allowlisted
 settings, `extension` / `zend_extension`, `openssl.cafile` / `curl.cainfo`, and
 `opentelemetry.conflicts`. A stored `opentelemetry.conflicts` that names a bundled
 module (e.g. `json`) is migrated to `opentelemetry = "Off"` on load.

@@ -295,10 +295,13 @@ where
     /// a healthy probe before returning.
     pub async fn ensure(&mut self, v: PhpVersion) -> Result<Listen, PhpError> {
         let result = self.ensure_inner(v).await;
-        if result.is_ok() {
-            self.failed_pools.remove(&v);
-        } else {
-            self.failed_pools.insert(v);
+        match &result {
+            Ok(_) | Err(PhpError::VersionNotInstalled { .. }) => {
+                self.failed_pools.remove(&v);
+            }
+            Err(_) => {
+                self.failed_pools.insert(v);
+            }
         }
         result
     }

@@ -306,23 +306,7 @@ where
         result
     }
 
-    async fn ensure_inner(&mut self, v: PhpVersion) -> Result<Listen, PhpError> {
-        let binary = self
-            .binaries
-            .get(&v)
-            .cloned()
-            .ok_or(PhpError::VersionNotInstalled { version: v })?;
-
-        if let Some(listen) = self.running_listen(v)? {
-            return Ok(listen);
-        }
-
-        let listen = self.plan_listen(v)?;
-
-        if let Listen::UnixSocket(ref path) = listen {
-            let _ = fs::remove_file(path);
-        }
-
+    fn pool_config(&self, v: PhpVersion, listen: Listen) -> PoolConfig {
         let mut cfg = PoolConfig::dev_defaults(v, listen, &self.dirs, self.instance_id);
         let no_overrides = BTreeMap::new();
         let overrides = self.ini_overrides.get(&v).unwrap_or(&no_overrides);
@@ -348,6 +332,27 @@ where
         }
 
         cfg.user_extensions = self.resolve_user_extensions(v);
+        cfg
+    }
+
+    async fn ensure_inner(&mut self, v: PhpVersion) -> Result<Listen, PhpError> {
+        let binary = self
+            .binaries
+            .get(&v)
+            .cloned()
+            .ok_or(PhpError::VersionNotInstalled { version: v })?;
+
+        if let Some(listen) = self.running_listen(v)? {
+            return Ok(listen);
+        }
+
+        let listen = self.plan_listen(v)?;
+
+        if let Listen::UnixSocket(ref path) = listen {
+            let _ = fs::remove_file(path);
+        }
+
+        let cfg = self.pool_config(v, listen);
 
         for path in [&cfg.config_path, &cfg.pid_file, &cfg.error_log] {
             if let Some(parent) = path.parent() {

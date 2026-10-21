@@ -155,13 +155,13 @@ const opentelemetryOptions = computed(() => {
 
 const savedOverrides = computed(() => overrideCount(props.overrides));
 
+/** Prefix of the daemon's error when a change persisted but the pool restart failed. */
+const SAVED_BUT_FAILED = "the change was saved";
+
 /**
  * Persist this version's overrides. Every field is sent, including the blank
  * ones: a blank value removes the override so the version inherits again.
  */
-/** Prefix of the daemon's error when a change persisted but the pool restart failed. */
-const SAVED_BUT_FAILED = "the change was saved";
-
 async function saveSettings(): Promise<void> {
   if (isBusy.value) return;
   busy.value = "settings";

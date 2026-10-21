@@ -141,10 +141,10 @@ pub fn validate_value(value: &str) -> Result<(), DirectiveError> {
     }
     let t = value.trim();
     if t.contains('"') {
-        let balanced = t.len() >= 2 && t.starts_with('"') && t.ends_with('"') && {
-            let inner = &t[1..t.len() - 1];
-            !inner.contains('"') && !inner.ends_with('\\')
-        };
+        let balanced = t
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .is_some_and(|inner| !inner.contains('"') && !inner.ends_with('\\'));
         if !balanced {
             return err(ValueErrorReason::IllegalCharacter);
         }

@@ -38,9 +38,10 @@ describe("overrideCount", () => {
     expect(overrideCount({ not_a_setting: "x" })).toBe(0);
   });
 
-  it("SETTING_KEYS covers the 8 allowlisted settings", () => {
-    expect(SETTING_KEYS).toHaveLength(8);
+  it("SETTING_KEYS covers the 9 allowlisted settings", () => {
+    expect(SETTING_KEYS).toHaveLength(9);
     expect(SETTING_KEYS).toContain("display_errors");
+    expect(SETTING_KEYS).toContain("opentelemetry");
   });
 });
 

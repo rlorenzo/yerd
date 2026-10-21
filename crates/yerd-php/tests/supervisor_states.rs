@@ -542,6 +542,31 @@ async fn stop_on_unmanaged_version_is_noop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn failed_ensure_stays_visible_as_failed_but_not_installed_does_not() {
+    let v = PhpVersion::new(8, 3);
+    let max = SupervisorPolicy::fpm().max_restart_attempts;
+    let plans: Vec<SpawnPlan> = (0..=max + 2)
+        .map(|i| SpawnPlan {
+            pid: 100 + i,
+            behavior: ChildBehavior::Crashes(ExitReason::Code(1)),
+        })
+        .collect();
+    let mut mgr = make_manager(FakeSpawner::new(plans), FakeProbe::always_refused(), v);
+
+    let _ = mgr.ensure(PhpVersion::new(7, 4)).await.unwrap_err();
+    assert!(mgr.snapshots().is_empty());
+
+    let _ = mgr.ensure(v).await.unwrap_err();
+    let snaps = mgr.snapshots();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].version, v);
+    assert_eq!(snaps[0].state, PoolRunState::Failed);
+
+    mgr.stop(v).await.unwrap();
+    assert!(mgr.snapshots().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn ensure_unknown_version_errors() {
     let v = PhpVersion::new(8, 3);
     let other = PhpVersion::new(7, 4);

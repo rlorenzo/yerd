@@ -169,7 +169,7 @@ async function saveSettings(): Promise<void> {
     const message = (e as IpcError).message;
     if (message.startsWith("the change was saved")) {
       await reloadPhp({ force: true });
-      applySettings(data.value?.settings);
+      if (!error.value) applySettings(data.value?.settings);
     }
     toast.error("Couldn't update PHP settings", message);
   } finally {
